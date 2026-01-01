@@ -11,3 +11,4 @@ services:
     # Important for scanning host ports from linux container
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
