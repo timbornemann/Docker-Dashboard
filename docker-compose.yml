@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  dashboard:
+    build: .
+    ports:
+      - "2999:8080"
+    volumes:
+      - ./server/data:/app/data
+    environment:
+      - NODE_ENV=production
+    # Important for scanning host ports from linux container
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

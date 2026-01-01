@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+
+# Production
+build/
+dist/
+
+# Misc
+.DS_Store
+*.log
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Server Data (Runtime Persistence)
+server/data/services.json
+server/data/uploads/*
+!server/data/uploads/.gitkeep
+
+# Docker
+.dockerignore
