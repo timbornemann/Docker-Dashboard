@@ -6,8 +6,11 @@ A modern, self-hosted dashboard to manage and organize your local services, Dock
 
 - **Service Scanning**: Automatically scan a range of ports to discover running HTTP services.
 - **Manual Management**: Add custom services manually if they aren't discovered.
+- **Full CRUD for Services**: Add, edit (title, URL, icon), and delete services.
 - **Drag & Drop**: Reorder your services on the dashboard easily.
 - **Customization**: Automatically fetches titles and favicons, with support for custom icon uploads.
+- **Quick Filtering**: Search services and filter by status (online, offline, manual).
+- **Status Tracking**: Shows online/offline state and remembers last scan details.
 - **Persistency**: Layout and service data are saved locally.
 
 ## Tech Stack
@@ -70,6 +73,7 @@ The dashboard will be available at [http://localhost:2999](http://localhost:2999
 
 - `GET /api/services`: Get all services.
 - `POST /api/service/add`: Add a new service manually.
-- `POST /api/service/update`: Update a service (title, icon).
+- `POST /api/service/update`: Update a service (URL, title, icon).
+- `POST /api/service/delete`: Delete a service.
 - `POST /api/services/reorder`: Update the order of services.
 - `POST /api/scan`: Trigger a port scan.
