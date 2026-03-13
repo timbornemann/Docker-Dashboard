@@ -3,7 +3,7 @@ services:
   dashboard:
     build: .
     ports:
-      - "2999:8080"
+      - "3000:8080"
     volumes:
       - ./server/data:/app/data
     environment:
