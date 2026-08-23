@@ -1,5 +1,6 @@
 services:
   dashboard:
+    image: ghcr.io/timbornemann/docker-dashboard:latest
     build: .
     ports:
       - "3000:8080"
