@@ -85,6 +85,31 @@ function getOpenUrl(serviceUrl) {
   }
 }
 
+function getIconSrc(icon) {
+  if (!icon || icon === 'data:,') {
+    return null;
+  }
+
+  if (icon.startsWith('/')) {
+    return `${API_BASE}${icon}`;
+  }
+
+  if (icon.startsWith('data:image/')) {
+    return icon;
+  }
+
+  try {
+    const parsed = new URL(icon);
+    if (parsed.hostname === 'host.docker.internal') {
+      parsed.hostname = window.location.hostname;
+    }
+
+    return parsed.toString();
+  } catch (error) {
+    return icon;
+  }
+}
+
 function App() {
   const [data, setData] = useState({ services: [], lastScan: null, scanRange: INITIAL_SCAN_RANGE });
   const [scanRange, setScanRange] = useState(INITIAL_SCAN_RANGE);
@@ -427,6 +452,7 @@ function App() {
 
   const renderCardBody = (service) => {
     const status = getServiceStatus(service);
+    const iconSrc = getIconSrc(service.icon);
 
     return (
       <>
@@ -437,9 +463,9 @@ function App() {
           className="card"
         >
           <div className="card-icon">
-            {service.icon ? (
+            {iconSrc ? (
               <img
-                src={service.icon.startsWith('/') ? `${API_BASE}${service.icon}` : service.icon}
+                src={iconSrc}
                 alt="service icon"
                 onError={(event) => {
                   event.currentTarget.style.display = 'none';
