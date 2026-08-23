@@ -1,14 +1,19 @@
-version: '3.8'
 services:
   dashboard:
     build: .
     ports:
       - "3000:8080"
     volumes:
-      - ./server/data:/app/data
+      - dashboard-data:/app/data
+      - ./server/data:/legacy-data:ro
     environment:
       - NODE_ENV=production
-    # Important for scanning host ports from linux container
+      - DATA_DIR=/app/data
+      - LEGACY_DATA_DIR=/legacy-data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+volumes:
+  dashboard-data:
+    name: docker-dashboard-data

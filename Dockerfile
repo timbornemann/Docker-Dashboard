@@ -23,9 +23,12 @@ COPY --from=client-build /app/client/dist ./public
 # Expose port
 EXPOSE 8080
 
-# Environment variables
+# Persistent dashboard data (cards, uploaded icons, cached images)
 ENV PORT=8080
 ENV NODE_ENV=production
+ENV DATA_DIR=/app/data
+RUN mkdir -p /app/data/uploads
+VOLUME ["/app/data"]
 
 # Start command
 CMD ["npm", "start"]
