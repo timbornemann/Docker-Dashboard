@@ -33,5 +33,3 @@ server/data/services.json
 server/data/uploads/*
 !server/data/uploads/.gitkeep
 
-# Docker
-.dockerignore
