@@ -53,12 +53,37 @@ A modern, self-hosted dashboard to manage and organize your local services, Dock
    # Client usually runs on http://localhost:5173
    ```
 
-### Running with Docker
+### Run the published image
 
-You can spin up the entire stack with a single command:
+The Docker image is published to GitHub Container Registry on every [GitHub Release](https://github.com/timbornemann/Docker-Dashboard/releases).
+
+Repository: [https://github.com/timbornemann/Docker-Dashboard](https://github.com/timbornemann/Docker-Dashboard)  
+Image: [`ghcr.io/timbornemann/docker-dashboard:latest`](https://github.com/timbornemann/Docker-Dashboard/pkgs/container/docker-dashboard)
+
+Create a GitHub Release to build and publish a new image. After the first publish, set the package visibility to **Public** under [GitHub Packages](https://github.com/timbornemann/Docker-Dashboard/pkgs/container/docker-dashboard) so anyone can pull it without logging in.
+
+Pull and run the current release:
 
 ```bash
-docker-compose up --build
+docker pull ghcr.io/timbornemann/docker-dashboard:latest
+docker run -d --name docker-dashboard -p 3000:8080 -v docker-dashboard-data:/app/data --add-host=host.docker.internal:host-gateway --restart unless-stopped ghcr.io/timbornemann/docker-dashboard:latest
+```
+
+Or with Compose (also uses `:latest`):
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+The dashboard will be available at [http://localhost:3000](http://localhost:3000).
+
+`:latest` always points to the newest published release. Pin a version with e.g. `ghcr.io/timbornemann/docker-dashboard:1.0.0` if you need a specific tag.
+
+### Build locally with Docker
+
+```bash
+docker compose up --build
 ```
 
 The dashboard will be available at [http://localhost:3000](http://localhost:3000).
