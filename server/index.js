@@ -9,38 +9,265 @@ const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'services.json');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const DEFAULT_SCAN_RANGE = { start: 3000, end: 3010, host: 'host.docker.internal' };
+const MAX_ICON_BYTES = 2 * 1024 * 1024;
 
-// Ensure directories exist
+const DEFAULT_DATA = {
+  services: [],
+  lastScan: null,
+  scanRange: DEFAULT_SCAN_RANGE
+};
+
+const ICON_EXTENSIONS = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/svg+xml': '.svg',
+  'image/x-icon': '.ico',
+  'image/vnd.microsoft.icon': '.ico'
+};
+
+fs.ensureDirSync(DATA_DIR);
 fs.ensureDirSync(UPLOADS_DIR);
-fs.ensureFileSync(DATA_FILE);
 
-// Configure Multer
+const migrateLegacyDataIfNeeded = () => {
+  const legacyDir = process.env.LEGACY_DATA_DIR;
+  if (!legacyDir) {
+    return;
+  }
+
+  const currentMissing = !fs.existsSync(DATA_FILE) || fs.readFileSync(DATA_FILE, 'utf8').trim() === '';
+  if (!currentMissing) {
+    return;
+  }
+
+  const legacyFile = path.join(legacyDir, 'services.json');
+  if (!fs.existsSync(legacyFile)) {
+    return;
+  }
+
+  fs.copySync(legacyDir, DATA_DIR, { overwrite: true });
+  console.log(`Migrated existing dashboard data from ${legacyDir} into ${DATA_DIR}`);
+};
+
+migrateLegacyDataIfNeeded();
+
+if (!fs.existsSync(DATA_FILE) || fs.readFileSync(DATA_FILE, 'utf8').trim() === '') {
+  fs.writeJsonSync(DATA_FILE, DEFAULT_DATA, { spaces: 2 });
+}
+
+const createIconFileName = (extension) => {
+  const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+  return `icon-${uniqueSuffix}${extension}`;
+};
+
 const storage = multer.diskStorage({
   destination(req, file, cb) {
     cb(null, UPLOADS_DIR);
   },
   filename(req, file, cb) {
-    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `icon-${uniqueSuffix}${path.extname(file.originalname)}`);
+    const extension = path.extname(file.originalname || '').toLowerCase() || '.png';
+    cb(null, createIconFileName(extension));
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: MAX_ICON_BYTES },
+  fileFilter(req, file, cb) {
+    if (!file.mimetype || !file.mimetype.startsWith('image/')) {
+      cb(new Error('Only image uploads are allowed'));
+      return;
+    }
+
+    cb(null, true);
+  }
+});
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(UPLOADS_DIR));
+app.use('/uploads', express.static(UPLOADS_DIR, {
+  fallthrough: true,
+  index: false,
+  maxAge: '7d'
+}));
 
-if (!fs.existsSync(DATA_FILE) || fs.readFileSync(DATA_FILE, 'utf8').trim() === '') {
-  fs.writeJsonSync(DATA_FILE, { services: [], lastScan: null, scanRange: DEFAULT_SCAN_RANGE });
-}
+const isLocalIcon = (iconPath) => typeof iconPath === 'string' && iconPath.startsWith('/uploads/');
 
-// Helpers
+const getIconExtension = (contentType, sourceUrl) => {
+  const type = String(contentType || '').split(';')[0].trim().toLowerCase();
+  if (ICON_EXTENSIONS[type]) {
+    return ICON_EXTENSIONS[type];
+  }
+
+  try {
+    const extension = path.extname(new URL(sourceUrl).pathname).toLowerCase();
+    if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'].includes(extension)) {
+      return extension === '.jpeg' ? '.jpg' : extension;
+    }
+  } catch (error) {
+    // Ignore invalid URLs and fall back to png.
+  }
+
+  return '.png';
+};
+
+const persistIconFromDataUrl = async (dataUrl) => {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s.exec(dataUrl);
+  if (!match) {
+    return dataUrl;
+  }
+
+  const buffer = Buffer.from(match[2], 'base64');
+  if (!buffer.length || buffer.length > MAX_ICON_BYTES) {
+    return dataUrl;
+  }
+
+  const fileName = createIconFileName(getIconExtension(match[1], ''));
+  await fs.writeFile(path.join(UPLOADS_DIR, fileName), buffer);
+  return `/uploads/${fileName}`;
+};
+
+const buildIconFetchUrls = (iconUrl) => {
+  const urls = [iconUrl];
+
+  try {
+    const parsed = new URL(iconUrl);
+    if (parsed.hostname === 'host.docker.internal') {
+      parsed.hostname = '127.0.0.1';
+      urls.push(parsed.toString());
+      parsed.hostname = 'localhost';
+      urls.push(parsed.toString());
+    }
+  } catch (error) {
+    // Ignore invalid URLs.
+  }
+
+  return [...new Set(urls)];
+};
+
+const persistIconFromUrl = async (iconUrl) => {
+  if (typeof iconUrl !== 'string' || !iconUrl.trim()) {
+    return null;
+  }
+
+  const trimmed = iconUrl.trim();
+  if (isLocalIcon(trimmed)) {
+    return trimmed;
+  }
+
+  if (trimmed.startsWith('data:')) {
+    if (!/^data:image\//i.test(trimmed)) {
+      return null;
+    }
+
+    try {
+      return await persistIconFromDataUrl(trimmed);
+    } catch (error) {
+      console.warn('Failed to persist data-URL icon:', error.message);
+      return null;
+    }
+  }
+
+  let lastError = null;
+
+  for (const candidateUrl of buildIconFetchUrls(trimmed)) {
+    try {
+      const response = await axios.get(candidateUrl, {
+        responseType: 'arraybuffer',
+        timeout: 5000,
+        maxContentLength: MAX_ICON_BYTES,
+        headers: {
+          Accept: 'image/*,*/*;q=0.8',
+          'User-Agent': 'Docker-Dashboard/1.0'
+        },
+        validateStatus: (status) => status >= 200 && status < 300
+      });
+
+      const contentType = String(response.headers['content-type'] || '').toLowerCase();
+      if (contentType.includes('text/html')) {
+        lastError = new Error(`Not an image: ${contentType || 'unknown type'}`);
+        continue;
+      }
+
+      const buffer = Buffer.from(response.data);
+      if (!buffer.length) {
+        lastError = new Error('Empty icon response');
+        continue;
+      }
+
+      const fileName = createIconFileName(getIconExtension(contentType, candidateUrl));
+      await fs.writeFile(path.join(UPLOADS_DIR, fileName), buffer);
+      return `/uploads/${fileName}`;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  console.warn('Failed to persist icon:', trimmed, lastError?.message || 'unknown error');
+  return trimmed;
+};
+
+const persistServiceIcon = async (service) => {
+  if (!service || isLocalIcon(service.icon) || !service.icon) {
+    return service;
+  }
+
+  const persistedIcon = await persistIconFromUrl(service.icon);
+  if (persistedIcon === service.icon) {
+    return service;
+  }
+
+  return { ...service, icon: persistedIcon };
+};
+
+const readData = async () => {
+  try {
+    const data = await fs.readJson(DATA_FILE);
+    return {
+      services: Array.isArray(data.services) ? data.services : [],
+      lastScan: data.lastScan || null,
+      scanRange: data.scanRange || DEFAULT_SCAN_RANGE
+    };
+  } catch (error) {
+    return { ...DEFAULT_DATA };
+  }
+};
+
+const writeData = async (data) => {
+  await fs.ensureDir(UPLOADS_DIR);
+  await fs.writeJson(DATA_FILE, {
+    services: data.services || [],
+    lastScan: data.lastScan || null,
+    scanRange: data.scanRange || DEFAULT_SCAN_RANGE
+  }, { spaces: 2 });
+};
+
+const persistExistingRemoteIcons = async () => {
+  const currentData = await readData();
+  let changed = false;
+  const services = [];
+
+  for (const service of currentData.services) {
+    const nextService = await persistServiceIcon(service);
+    if (nextService.icon !== service.icon) {
+      changed = true;
+    }
+    services.push(nextService);
+  }
+
+  if (changed) {
+    await writeData({ ...currentData, services });
+    console.log('Cached remote service icons into the data volume');
+  }
+};
+
 const normalizeServiceUrl = (rawUrl) => {
   if (typeof rawUrl !== 'string') {
     return null;
@@ -96,7 +323,7 @@ const isTruthy = (value) => {
 };
 
 const removeUploadedIconIfLocal = async (iconPath) => {
-  if (typeof iconPath !== 'string' || !iconPath.startsWith('/uploads/')) {
+  if (!isLocalIcon(iconPath)) {
     return;
   }
 
@@ -158,7 +385,7 @@ const getPageInfo = async (url) => {
     const title = $('title').text() || url;
     let icon = $('link[rel="icon"]').attr('href') || $('link[rel="shortcut icon"]').attr('href');
 
-    if (icon && !icon.startsWith('http')) {
+    if (icon && !icon.startsWith('http') && !icon.startsWith('data:')) {
       const u = new URL(url);
       if (icon.startsWith('//')) {
         icon = u.protocol + icon;
@@ -175,10 +402,24 @@ const getPageInfo = async (url) => {
   }
 };
 
-// Routes
+const handleMulterUpload = (req, res, next) => {
+  upload.single('icon')(req, res, (error) => {
+    if (!error) {
+      next();
+      return;
+    }
+
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? 'Icon is larger than 2MB'
+      : (error.message || 'Upload failed');
+
+    res.status(400).json({ error: message });
+  });
+};
+
 app.get('/api/services', async (req, res) => {
   try {
-    const data = await fs.readJson(DATA_FILE);
+    const data = await readData();
     res.json(data);
   } catch (error) {
     res.status(500).json({ error: 'Failed to read data' });
@@ -192,7 +433,7 @@ app.post('/api/services/reorder', async (req, res) => {
       return res.status(400).json({ error: 'Invalid data' });
     }
 
-    const currentData = await fs.readJson(DATA_FILE);
+    const currentData = await readData();
     const currentServices = currentData.services || [];
     const serviceMap = new Map();
 
@@ -220,7 +461,7 @@ app.post('/api/services/reorder', async (req, res) => {
     });
 
     const nextServices = [...orderedServices, ...Array.from(serviceMap.values())];
-    await fs.writeJson(DATA_FILE, { ...currentData, services: nextServices });
+    await writeData({ ...currentData, services: nextServices });
 
     res.json({ success: true, services: nextServices });
   } catch (error) {
@@ -229,7 +470,7 @@ app.post('/api/services/reorder', async (req, res) => {
   }
 });
 
-app.post('/api/service/update', upload.single('icon'), async (req, res) => {
+app.post('/api/service/update', handleMulterUpload, async (req, res) => {
   try {
     const { oldUrl, url, title, removeIcon } = req.body;
     const file = req.file;
@@ -241,7 +482,7 @@ app.post('/api/service/update', upload.single('icon'), async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL' });
     }
 
-    const currentData = await fs.readJson(DATA_FILE);
+    const currentData = await readData();
     const services = currentData.services || [];
 
     const idx = services.findIndex((service) => normalizeServiceUrl(service.url) === currentUrl);
@@ -279,7 +520,7 @@ app.post('/api/service/update', upload.single('icon'), async (req, res) => {
     }
 
     services[idx] = nextService;
-    await fs.writeJson(DATA_FILE, { ...currentData, services });
+    await writeData({ ...currentData, services });
 
     res.json({ success: true, service: nextService });
   } catch (error) {
@@ -295,7 +536,7 @@ app.post('/api/service/delete', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL' });
     }
 
-    const currentData = await fs.readJson(DATA_FILE);
+    const currentData = await readData();
     const services = currentData.services || [];
     const idx = services.findIndex((service) => normalizeServiceUrl(service.url) === normalizedUrl);
 
@@ -306,7 +547,7 @@ app.post('/api/service/delete', async (req, res) => {
     const [removedService] = services.splice(idx, 1);
     await removeUploadedIconIfLocal(removedService.icon);
 
-    await fs.writeJson(DATA_FILE, { ...currentData, services });
+    await writeData({ ...currentData, services });
     res.json({ success: true, removedUrl: removedService.url });
   } catch (error) {
     console.error('Delete failed:', error);
@@ -321,7 +562,7 @@ app.post('/api/service/add', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL' });
     }
 
-    const currentData = await fs.readJson(DATA_FILE);
+    const currentData = await readData();
     const services = currentData.services || [];
     const exists = services.some((service) => normalizeServiceUrl(service.url) === normalizedUrl);
 
@@ -330,12 +571,13 @@ app.post('/api/service/add', async (req, res) => {
     }
 
     const info = await getPageInfo(normalizedUrl);
+    const persistedIcon = await persistIconFromUrl(info.icon);
 
     const newService = {
       url: normalizedUrl,
       port: getServicePortFromUrl(normalizedUrl),
       title: info.title || normalizedUrl,
-      icon: info.icon,
+      icon: persistedIcon,
       status: 'manual',
       manual: true,
       lastSeen: Date.now()
@@ -343,7 +585,7 @@ app.post('/api/service/add', async (req, res) => {
 
     services.push(newService);
 
-    await fs.writeJson(DATA_FILE, { ...currentData, services });
+    await writeData({ ...currentData, services });
     res.json({ success: true, service: newService });
   } catch (error) {
     console.error('Add failed:', error);
@@ -397,11 +639,11 @@ app.post('/api/scan', async (req, res) => {
   }
 
   try {
-    const currentData = await fs.readJson(DATA_FILE);
+    const currentData = await readData();
     let nextServices = [...(currentData.services || [])];
     const foundByUrl = new Map(foundServices.map((service) => [normalizeServiceUrl(service.url), service]));
 
-    foundServices.forEach((found) => {
+    for (const found of foundServices) {
       const foundKey = normalizeServiceUrl(found.url);
       const idx = nextServices.findIndex((service) => normalizeServiceUrl(service.url) === foundKey);
 
@@ -415,12 +657,22 @@ app.post('/api/scan', async (req, res) => {
             lastSeen: Date.now()
           };
         } else {
-          nextServices[idx] = { ...existing, ...found, lastSeen: Date.now() };
+          const keepCustomIcon = isLocalIcon(existing.icon);
+          nextServices[idx] = {
+            ...existing,
+            ...found,
+            icon: keepCustomIcon ? existing.icon : await persistIconFromUrl(found.icon),
+            lastSeen: Date.now()
+          };
         }
       } else {
-        nextServices.push({ ...found, lastSeen: Date.now() });
+        nextServices.push({
+          ...found,
+          icon: await persistIconFromUrl(found.icon),
+          lastSeen: Date.now()
+        });
       }
-    });
+    }
 
     nextServices = nextServices.map((service) => {
       const serviceKey = normalizeServiceUrl(service.url);
@@ -439,7 +691,7 @@ app.post('/api/scan', async (req, res) => {
       return service;
     });
 
-    await fs.writeJson(DATA_FILE, {
+    await writeData({
       services: nextServices,
       lastScan: Date.now(),
       scanRange: { start, end, host: targetHost }
@@ -453,4 +705,8 @@ app.post('/api/scan', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Persistent data directory: ${DATA_DIR}`);
+  persistExistingRemoteIcons().catch((error) => {
+    console.warn('Could not cache existing icons:', error.message);
+  });
 });
