@@ -11,7 +11,7 @@ A modern, self-hosted dashboard to manage and organize your local services, Dock
 - **Customization**: Automatically fetches titles and favicons, with support for custom icon uploads.
 - **Quick Filtering**: Search services and filter by status (online, offline, manual).
 - **Status Tracking**: Shows online/offline state and remembers last scan details.
-- **Persistency**: Layout and service data are saved locally.
+- **Persistency**: Cards, layout, uploaded icons, and cached images are stored in a Docker volume and shared for every visitor.
 
 ## Tech Stack
 
@@ -61,13 +61,28 @@ You can spin up the entire stack with a single command:
 docker-compose up --build
 ```
 
-The dashboard will be available at [http://localhost:2999](http://localhost:2999).
+The dashboard will be available at [http://localhost:3000](http://localhost:3000).
+
+All dashboard data lives in the named Docker volume `docker-dashboard-data`:
+
+- self-created cards and their order
+- uploaded icons and images
+- automatically cached favicons so other devices and visitors see the same pictures
+
+On first start, existing files from `server/data` are copied into that volume automatically.
+
+Container rebuilds keep this data. Remove it only if you intentionally want a reset:
+
+```bash
+docker compose down
+docker volume rm docker-dashboard-data
+```
 
 ## Project Structure
 
 - **/client**: React frontend application.
 - **/server**: Express API backend.
-- **/server/data**: Stores persistent data (`services.json`) and uploaded icons.
+- **/server/data**: Local-dev copy of persistent data (`services.json`) and uploaded icons. In Docker this is the named volume `docker-dashboard-data` mounted at `/app/data`.
 
 ## API Endpoints
 
