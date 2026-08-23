@@ -28,9 +28,35 @@ const ICON_EXTENSIONS = {
   'image/gif': '.gif',
   'image/webp': '.webp',
   'image/svg+xml': '.svg',
+  'image/svg': '.svg',
   'image/x-icon': '.ico',
-  'image/vnd.microsoft.icon': '.ico'
+  'image/vnd.microsoft.icon': '.ico',
+  'image/icon': '.ico'
 };
+
+const PAGE_HEADERS = {
+  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+};
+
+const ICON_HEADERS = {
+  Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+  'User-Agent': PAGE_HEADERS['User-Agent']
+};
+
+const ORIGIN_ICON_PATHS = [
+  '/favicon.ico',
+  '/favicon.svg',
+  '/favicon.png',
+  '/apple-touch-icon.png',
+  '/apple-touch-icon-precomposed.png',
+  '/apple-touch-icon-180x180.png',
+  '/logo.svg',
+  '/logo.png',
+  '/icon.svg',
+  '/icon.png'
+];
 
 fs.ensureDirSync(DATA_DIR);
 fs.ensureDirSync(UPLOADS_DIR);
@@ -118,20 +144,79 @@ const getIconExtension = (contentType, sourceUrl) => {
   return '.png';
 };
 
+const sniffImageExtension = (buffer) => {
+  if (!buffer || buffer.length < 4) {
+    return null;
+  }
+
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return '.png';
+  }
+
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return '.jpg';
+  }
+
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+    return '.gif';
+  }
+
+  if (buffer[0] === 0x00 && buffer[1] === 0x00 && (buffer[2] === 0x01 || buffer[2] === 0x02) && buffer[3] === 0x00) {
+    return '.ico';
+  }
+
+  if (buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.length >= 12 && buffer.slice(8, 12).toString('ascii') === 'WEBP') {
+    return '.webp';
+  }
+
+  const head = buffer.slice(0, 256).toString('utf8').trim().toLowerCase();
+  if (head.includes('<svg')) {
+    return '.svg';
+  }
+
+  if (head.startsWith('<!doctype html') || head.startsWith('<html')) {
+    return null;
+  }
+
+  return null;
+};
+
+const isProbablyImageBuffer = (buffer, contentType) => {
+  if (sniffImageExtension(buffer)) {
+    return true;
+  }
+
+  const type = String(contentType || '').toLowerCase();
+  return type.startsWith('image/') && !type.includes('text/html');
+};
+
 const persistIconFromDataUrl = async (dataUrl) => {
-  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s.exec(dataUrl);
-  if (!match) {
-    return dataUrl;
+  const base64Match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s.exec(dataUrl);
+  if (base64Match) {
+    const buffer = Buffer.from(base64Match[2], 'base64');
+    if (!buffer.length || buffer.length > MAX_ICON_BYTES) {
+      return null;
+    }
+
+    const fileName = createIconFileName(sniffImageExtension(buffer) || getIconExtension(base64Match[1], ''));
+    await fs.writeFile(path.join(UPLOADS_DIR, fileName), buffer);
+    return `/uploads/${fileName}`;
   }
 
-  const buffer = Buffer.from(match[2], 'base64');
-  if (!buffer.length || buffer.length > MAX_ICON_BYTES) {
-    return dataUrl;
+  const svgMatch = /^data:image\/svg\+xml(?:;charset=[^;,]+)?,(.*)$/is.exec(dataUrl);
+  if (svgMatch && !/;base64,/i.test(dataUrl)) {
+    const svg = decodeURIComponent(svgMatch[1]);
+    const buffer = Buffer.from(svg, 'utf8');
+    if (!buffer.length || buffer.length > MAX_ICON_BYTES) {
+      return null;
+    }
+
+    const fileName = createIconFileName('.svg');
+    await fs.writeFile(path.join(UPLOADS_DIR, fileName), buffer);
+    return `/uploads/${fileName}`;
   }
 
-  const fileName = createIconFileName(getIconExtension(match[1], ''));
-  await fs.writeFile(path.join(UPLOADS_DIR, fileName), buffer);
-  return `/uploads/${fileName}`;
+  return null;
 };
 
 const buildIconFetchUrls = (iconUrl) => {
@@ -152,7 +237,7 @@ const buildIconFetchUrls = (iconUrl) => {
   return [...new Set(urls)];
 };
 
-const persistIconFromUrl = async (iconUrl) => {
+const persistIconFromUrl = async (iconUrl, options = {}) => {
   if (typeof iconUrl !== 'string' || !iconUrl.trim()) {
     return null;
   }
@@ -170,7 +255,9 @@ const persistIconFromUrl = async (iconUrl) => {
     try {
       return await persistIconFromDataUrl(trimmed);
     } catch (error) {
-      console.warn('Failed to persist data-URL icon:', error.message);
+      if (!options.quiet) {
+        console.warn('Failed to persist data-URL icon:', error.message);
+      }
       return null;
     }
   }
@@ -181,28 +268,27 @@ const persistIconFromUrl = async (iconUrl) => {
     try {
       const response = await axios.get(candidateUrl, {
         responseType: 'arraybuffer',
-        timeout: 5000,
+        timeout: 4000,
         maxContentLength: MAX_ICON_BYTES,
-        headers: {
-          Accept: 'image/*,*/*;q=0.8',
-          'User-Agent': 'Docker-Dashboard/1.0'
-        },
+        maxRedirects: 5,
+        headers: ICON_HEADERS,
         validateStatus: (status) => status >= 200 && status < 300
       });
 
       const contentType = String(response.headers['content-type'] || '').toLowerCase();
-      if (contentType.includes('text/html')) {
-        lastError = new Error(`Not an image: ${contentType || 'unknown type'}`);
-        continue;
-      }
-
       const buffer = Buffer.from(response.data);
       if (!buffer.length) {
         lastError = new Error('Empty icon response');
         continue;
       }
 
-      const fileName = createIconFileName(getIconExtension(contentType, candidateUrl));
+      if (!isProbablyImageBuffer(buffer, contentType)) {
+        lastError = new Error(`Not an image: ${contentType || 'unknown type'}`);
+        continue;
+      }
+
+      const extension = sniffImageExtension(buffer) || getIconExtension(contentType, candidateUrl);
+      const fileName = createIconFileName(extension);
       await fs.writeFile(path.join(UPLOADS_DIR, fileName), buffer);
       return `/uploads/${fileName}`;
     } catch (error) {
@@ -210,21 +296,31 @@ const persistIconFromUrl = async (iconUrl) => {
     }
   }
 
-  console.warn('Failed to persist icon:', trimmed, lastError?.message || 'unknown error');
-  return trimmed;
+  if (!options.quiet) {
+    console.warn('Failed to persist icon:', trimmed, lastError?.message || 'unknown error');
+  }
+
+  return null;
 };
 
 const persistServiceIcon = async (service) => {
-  if (!service || isLocalIcon(service.icon) || !service.icon) {
+  if (!service || isLocalIcon(service.icon)) {
     return service;
   }
 
-  const persistedIcon = await persistIconFromUrl(service.icon);
-  if (persistedIcon === service.icon) {
-    return service;
+  const info = await getPageInfo(service.url);
+  if (isLocalIcon(info.icon)) {
+    return { ...service, icon: info.icon };
   }
 
-  return { ...service, icon: persistedIcon };
+  if (service.icon) {
+    const persistedIcon = await persistIconFromUrl(service.icon);
+    if (isLocalIcon(persistedIcon)) {
+      return { ...service, icon: persistedIcon };
+    }
+  }
+
+  return service;
 };
 
 const readData = async () => {
@@ -376,30 +472,290 @@ const checkPort = (host, port, timeout = 1000) => {
   });
 };
 
-const getPageInfo = async (url) => {
+const resolveUrl = (baseUrl, href) => {
+  if (typeof href !== 'string') {
+    return null;
+  }
+
+  const trimmed = href.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.startsWith('data:')) {
+    return trimmed;
+  }
+
   try {
-    const response = await axios.get(url, { timeout: 2000 });
-    const html = response.data;
-    const $ = cheerio.load(html);
+    return new URL(trimmed, baseUrl).toString();
+  } catch (error) {
+    return null;
+  }
+};
 
-    const title = $('title').text() || url;
-    let icon = $('link[rel="icon"]').attr('href') || $('link[rel="shortcut icon"]').attr('href');
+const isIconRel = (rel) => {
+  const parts = String(rel || '').toLowerCase().split(/[\s,]+/).filter(Boolean);
+  return parts.some((part) => (
+    part === 'icon'
+    || part === 'shortcut'
+    || part === 'mask-icon'
+    || part === 'fluid-icon'
+    || part.includes('apple-touch-icon')
+  ));
+};
 
-    if (icon && !icon.startsWith('http') && !icon.startsWith('data:')) {
-      const u = new URL(url);
-      if (icon.startsWith('//')) {
-        icon = u.protocol + icon;
-      } else if (icon.startsWith('/')) {
-        icon = u.origin + icon;
-      } else {
-        icon = `${u.origin}/${icon}`;
-      }
+const parseIconSize = (sizes) => {
+  const value = String(sizes || '').trim().toLowerCase();
+  if (value === 'any') {
+    return 512;
+  }
+
+  let maxSize = 0;
+  for (const part of value.split(/\s+/)) {
+    const match = part.match(/(\d+)\s*x\s*(\d+)/i);
+    if (match) {
+      maxSize = Math.max(maxSize, parseInt(match[1], 10), parseInt(match[2], 10));
+    }
+  }
+
+  return maxSize;
+};
+
+const scoreIconCandidate = (candidate) => {
+  let score = 0;
+  const href = String(candidate.href || '').toLowerCase();
+  const type = String(candidate.type || '').toLowerCase();
+  const rel = String(candidate.rel || '').toLowerCase();
+  const size = parseIconSize(candidate.sizes);
+
+  if (href.startsWith('data:image/')) {
+    score += 90;
+  }
+
+  if (type.includes('svg') || href.includes('.svg')) {
+    score += 55;
+  } else if (type.includes('png') || href.includes('.png')) {
+    score += 45;
+  } else if (type.includes('webp') || href.includes('.webp')) {
+    score += 40;
+  } else if (type.includes('jpeg') || type.includes('jpg') || href.includes('.jpg')) {
+    score += 20;
+  } else if (type.includes('icon') || href.includes('.ico')) {
+    score += 15;
+  }
+
+  if (rel.includes('apple-touch-icon')) {
+    score += 30;
+  } else if (rel.includes('manifest')) {
+    score += 25;
+  } else if (rel.split(/[\s,]+/).includes('icon')) {
+    score += 20;
+  } else if (rel.includes('shortcut')) {
+    score += 12;
+  } else if (rel.includes('mask-icon')) {
+    score += 8;
+  } else if (rel === 'og:image' || rel === 'twitter:image') {
+    score += 4;
+  } else if (rel === 'fallback') {
+    score += 2;
+  }
+
+  if (size >= 180) {
+    score += 25;
+  } else if (size >= 128) {
+    score += 20;
+  } else if (size >= 64) {
+    score += 12;
+  } else if (size >= 32) {
+    score += 6;
+  }
+
+  return score;
+};
+
+const fetchPageHtml = async (url) => {
+  const urlsToTry = [url];
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'http:') {
+      const httpsUrl = new URL(url);
+      httpsUrl.protocol = 'https:';
+      urlsToTry.push(httpsUrl.toString());
+    }
+  } catch (error) {
+    // Ignore invalid URLs and keep the original candidate.
+  }
+
+  let lastError = null;
+
+  for (const candidateUrl of urlsToTry) {
+    try {
+      const response = await axios.get(candidateUrl, {
+        timeout: 5000,
+        maxRedirects: 5,
+        responseType: 'text',
+        headers: PAGE_HEADERS,
+        validateStatus: (status) => status >= 200 && status < 400
+      });
+
+      return {
+        html: typeof response.data === 'string' ? response.data : '',
+        finalUrl: response.request?.res?.responseUrl || candidateUrl
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('Failed to fetch page');
+};
+
+const collectManifestIcons = async (manifestUrl) => {
+  try {
+    const response = await axios.get(manifestUrl, {
+      timeout: 4000,
+      headers: {
+        ...PAGE_HEADERS,
+        Accept: 'application/manifest+json,application/json;q=0.9,*/*;q=0.8'
+      },
+      validateStatus: (status) => status >= 200 && status < 300
+    });
+
+    const icons = response.data?.icons;
+    if (!Array.isArray(icons)) {
+      return [];
     }
 
-    return { title, icon };
+    return icons
+      .map((icon) => ({
+        href: resolveUrl(manifestUrl, icon.src),
+        type: icon.type || '',
+        sizes: icon.sizes || '',
+        rel: 'manifest'
+      }))
+      .filter((icon) => icon.href);
   } catch (error) {
-    return { title: url, icon: null };
+    return [];
   }
+};
+
+const persistFirstAvailableIcon = async (candidates) => {
+  const ranked = [...candidates]
+    .filter((candidate) => candidate?.href)
+    .sort((a, b) => scoreIconCandidate(b) - scoreIconCandidate(a));
+
+  const seen = new Set();
+  let attempts = 0;
+
+  for (const candidate of ranked) {
+    if (seen.has(candidate.href) || attempts >= 10) {
+      continue;
+    }
+
+    seen.add(candidate.href);
+    attempts += 1;
+
+    const persisted = await persistIconFromUrl(candidate.href, { quiet: true });
+    if (isLocalIcon(persisted)) {
+      return persisted;
+    }
+  }
+
+  return null;
+};
+
+const getPageInfo = async (url) => {
+  const candidates = [];
+  let title = url;
+  let pageUrl = url;
+
+  try {
+    const page = await fetchPageHtml(url);
+    pageUrl = page.finalUrl || url;
+
+    if (page.html) {
+      const $ = cheerio.load(page.html);
+      title = ($('title').first().text() || '').replace(/\s+/g, ' ').trim() || url;
+
+      let manifestHref = null;
+
+      $('link[href]').each((_, element) => {
+        const rel = $(element).attr('rel') || '';
+        const href = resolveUrl(pageUrl, $(element).attr('href'));
+        if (!href) {
+          return;
+        }
+
+        const relParts = String(rel).toLowerCase().split(/[\s,]+/).filter(Boolean);
+        if (relParts.includes('manifest')) {
+          manifestHref = href;
+          return;
+        }
+
+        if (!isIconRel(rel)) {
+          return;
+        }
+
+        candidates.push({
+          href,
+          rel: String(rel).toLowerCase(),
+          type: $(element).attr('type') || '',
+          sizes: $(element).attr('sizes') || ''
+        });
+      });
+
+      if (manifestHref) {
+        const manifestIcons = await collectManifestIcons(manifestHref);
+        candidates.push(...manifestIcons);
+      }
+
+      const metaImage = $('meta[property="og:image"]').attr('content')
+        || $('meta[name="twitter:image"]').attr('content')
+        || $('meta[name="msapplication-TileImage"]').attr('content')
+        || $('meta[itemprop="image"]').attr('content');
+      const metaHref = resolveUrl(pageUrl, metaImage);
+      if (metaHref) {
+        candidates.push({
+          href: metaHref,
+          rel: 'og:image',
+          type: '',
+          sizes: ''
+        });
+      }
+    }
+  } catch (error) {
+    // Keep origin fallbacks even if the HTML page cannot be fetched.
+  }
+
+  try {
+    const parsedPage = new URL(pageUrl);
+    ORIGIN_ICON_PATHS.forEach((iconPath) => {
+      candidates.push({
+        href: `${parsedPage.origin}${iconPath}`,
+        rel: 'fallback',
+        type: '',
+        sizes: ''
+      });
+    });
+
+    const basePath = parsedPage.pathname.replace(/\/[^/]*$/, '');
+    if (basePath && basePath !== '/') {
+      ['/favicon.ico', '/favicon.svg', '/favicon.png', '/apple-touch-icon.png'].forEach((iconPath) => {
+        candidates.push({
+          href: `${parsedPage.origin}${basePath}${iconPath}`,
+          rel: 'fallback',
+          type: '',
+          sizes: ''
+        });
+      });
+    }
+  } catch (error) {
+    // Ignore invalid page URLs.
+  }
+
+  const icon = await persistFirstAvailableIcon(candidates);
+  return { title, icon };
 };
 
 const handleMulterUpload = (req, res, next) => {
@@ -571,13 +927,12 @@ app.post('/api/service/add', async (req, res) => {
     }
 
     const info = await getPageInfo(normalizedUrl);
-    const persistedIcon = await persistIconFromUrl(info.icon);
 
     const newService = {
       url: normalizedUrl,
       port: getServicePortFromUrl(normalizedUrl),
       title: info.title || normalizedUrl,
-      icon: persistedIcon,
+      icon: info.icon,
       status: 'manual',
       manual: true,
       lastSeen: Date.now()
@@ -654,21 +1009,20 @@ app.post('/api/scan', async (req, res) => {
             ...existing,
             status: 'online',
             port: found.port,
-            lastSeen: Date.now()
+            lastSeen: Date.now(),
+            icon: isLocalIcon(existing.icon) ? existing.icon : (found.icon || existing.icon)
           };
         } else {
-          const keepCustomIcon = isLocalIcon(existing.icon);
           nextServices[idx] = {
             ...existing,
             ...found,
-            icon: keepCustomIcon ? existing.icon : await persistIconFromUrl(found.icon),
+            icon: isLocalIcon(existing.icon) ? existing.icon : (found.icon || existing.icon),
             lastSeen: Date.now()
           };
         }
       } else {
         nextServices.push({
           ...found,
-          icon: await persistIconFromUrl(found.icon),
           lastSeen: Date.now()
         });
       }
